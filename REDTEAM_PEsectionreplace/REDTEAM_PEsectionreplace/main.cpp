@@ -56,24 +56,24 @@ void _InitPeStruct(PInPeConfig _Pe, PVOID pPeAddress, SIZE_T sPeSize) {
 }
 
 
-PIMAGE_SECTION_HEADER find_section_by_name(const char* sectionName, InPeConfig *pe)
+PIMAGE_SECTION_HEADER find_section_by_name(const char* sectionName, InPeConfig pe)
 {
-	for (int i = 0; i < pe->pNtHdr->FileHeader.NumberOfSections; i++) {
-		if (strncmp((const char*)pe->pSecHdr[i].Name, sectionName, IMAGE_SIZEOF_SHORT_NAME) == 0) {
-			return &pe->pSecHdr[i];
+	for (int i = 0; i < pe.pNtHdr->FileHeader.NumberOfSections; i++) {
+		if (strncmp((const char*)pe.pSecHdr[i].Name, sectionName, IMAGE_SIZEOF_SHORT_NAME) == 0) {
+			return &pe.pSecHdr[i];
 		}
 	}
 }
 
-PVOID get_section_addr(PIMAGE_SECTION_HEADER section, InPeConfig* pe) {
-	return (PVOID)((ULONG_PTR)pe->base + section->PointerToRawData);
+PVOID get_section_addr(PIMAGE_SECTION_HEADER section, InPeConfig pe) {
+	return (PVOID)((ULONG_PTR)pe.base + section->PointerToRawData);
 }
 
 size_t get_section_size(PIMAGE_SECTION_HEADER section) {
 	return section->SizeOfRawData;
 }
 
-void clear_section(PIMAGE_SECTION_HEADER section, InPeConfig* pe) {
+void clear_section(PIMAGE_SECTION_HEADER section, InPeConfig pe) {
 	PVOID addr = get_section_addr(section, pe);
 	size_t size = get_section_size(section);
 	memset(addr, 0, size);
@@ -83,11 +83,11 @@ void clear_section(PIMAGE_SECTION_HEADER section, InPeConfig* pe) {
 
 
 
-void set_section(PIMAGE_SECTION_HEADER section_src, InPeConfig* pe_src, PIMAGE_SECTION_HEADER dst_section, InPeConfig* pe_dst, PVOID new_addr) {
+void set_section(PIMAGE_SECTION_HEADER section_src, InPeConfig pe_src, PIMAGE_SECTION_HEADER dst_section, InPeConfig pe_dst, PVOID new_addr) {
 	PVOID addr = get_section_addr(section_src, pe_src);
 	size_t size = get_section_size(section_src);
 
-	dst_section->PointerToRawData = (ULONG_PTR)new_addr - (ULONG_PTR)pe_dst->base;
+	dst_section->PointerToRawData = (ULONG_PTR)new_addr - (ULONG_PTR)pe_dst.base;
 	dst_section->SizeOfRawData = size;
 
 	memcpy(new_addr, addr, size);
@@ -111,7 +111,23 @@ int main(int argc, char *argv[])
 
 
 	// get the source section
-	PIMAGE_SECTION_HEADER src_section = find_section_by_name(".rsrc", &src_pe);
+	PIMAGE_SECTION_HEADER src_section = find_section_by_name(".rsrc", src_pe);
+
+	// duplicate dst_pe with more space for
+	size_t new_img_size = dst_size + get_section_size(src_section);
+	PVOID new_dst = (PVOID)VirtualAlloc(NULL, new_img_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+	memcpy(new_dst, dst, new_img_size);
+
+
+	// clear the destination section
+	PIMAGE_SECTION_HEADER dst_section = find_section_by_name(".rsrc", dst_pe);
+	clear_section(dst_section, dst_pe);
+
+
+
+
+
+
 
 
 
