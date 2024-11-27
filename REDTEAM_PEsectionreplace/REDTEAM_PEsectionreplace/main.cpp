@@ -6,6 +6,8 @@
 #include <dbghelp.h>
 #include <winternl.h>
 #include <psapi.h>
+#include <time.h>
+
 
 typedef struct _InPeConfig {
 	PVOID base;
@@ -108,6 +110,84 @@ void check_collision(PInPeConfig _Pe)
 	}
 }
 
+void switch_section(PIMAGE_SECTION_HEADER sectionA, PIMAGE_SECTION_HEADER sectionB)
+{
+	IMAGE_SECTION_HEADER tmp = *sectionA;
+	*sectionA = *sectionB;
+	*sectionB = tmp;
+}
+void sort_section_table(PInPeConfig _Pe)
+{
+	WORD nbSections = _Pe->pNtHdr->FileHeader.NumberOfSections;
+	bool changed = FALSE;
+
+	
+	do
+	{
+		changed = FALSE;
+		for (int i = 0; i < _Pe->pNtHdr->FileHeader.NumberOfSections - 1; i++) {
+			for (int j = i + 1; j < _Pe->pNtHdr->FileHeader.NumberOfSections; j++) {
+				if (_Pe->pSecHdr[i].VirtualAddress > _Pe->pSecHdr[j].VirtualAddress) {// or _Pe->pSecHdr[i].PointerToRawData??
+
+					changed = TRUE;
+					printf("switch : %lx %lx / %s %s\n", _Pe->pSecHdr[i].Misc.VirtualSize, _Pe->pSecHdr[j].Misc.VirtualSize, _Pe->pSecHdr[i].Name, _Pe->pSecHdr[j].Name);
+					switch_section(&_Pe->pSecHdr[i], &_Pe->pSecHdr[j]);
+					
+				}
+			}
+		}
+	} while (changed == TRUE);
+}
+
+
+// Pour chaque IMAGE_RESOURCE_DIRECTORY il y a plusieurs IMAGE_RESOURCE_DIRECTORY_ENTRY dont la premiere commence juste apres l'IMAGE_RESOURCE_DIRECTORY
+// IMAGE_RESOURCE_DIRECTORY_ENTRY peut etre nommée ou non
+void read_ressources_dir(PInPeConfig _Pe, PIMAGE_RESOURCE_DIRECTORY dir,int level, DWORD diff)
+{
+	PIMAGE_RESOURCE_DIRECTORY_ENTRY entries = (PIMAGE_RESOURCE_DIRECTORY_ENTRY)(dir + 1);
+	printf("%*sdir->NumberOfNamedEntries = %ld. ", 4 * level, "", dir->NumberOfNamedEntries);
+	printf("%*sdir->NumberOfIdEntrie = %ld. ", 4 * level, "",dir->NumberOfIdEntries);
+	printf("%*sRES DIR = %p\n", 4 * level,"",dir);
+	for (int i = 0; i < dir->NumberOfNamedEntries + dir->NumberOfIdEntries; i++) {		
+		/*printf("%*d----------DataIsDirectory:%lx\n", 4 * level, i, entries[i].DataIsDirectory);
+		printf("%*d----------Id:%lx\n", 4 * level,i, entries[i].Id);
+		printf("%*d----------Name:%lx\n", 4 * level,i, entries[i].Name);
+		printf("%*d----------NameIsString:%lx\n", 4 * level,i, entries[i].NameIsString);
+		printf("%*d----------NameOffset:%lx\n", 4 * level,i, entries[i].NameOffset);
+		printf("%*d----------OffsetToData:%lx\n", 4 * level,i, entries[i].OffsetToData);
+		printf("%*d----------OffsetToDirectory:%lx\n", 4 * level, i, entries[i].OffsetToDirectory);*/
+
+		/*if (entries[i].NameIsString) {
+			PIMAGE_RESOURCE_DIR_STRING_U str = (PIMAGE_RESOURCE_DIR_STRING_U)((PCHAR)dir + entries[i].NameOffset);
+			str->Length;
+			char* ret = (char*)malloc(str->Length + 1);
+			memset(ret, 0, str->Length + 1);
+			WideCharToMultiByte(CP_ACP, NULL, (LPCWCH)&str->NameString, str->Length, ret, str->Length, NULL, NULL);
+			printf("Name : %s\n", ret);
+
+
+		}*/
+
+		if (entries[i].DataIsDirectory) {
+			PIMAGE_RESOURCE_DIRECTORY sub_dir = (PIMAGE_RESOURCE_DIRECTORY)((PCHAR)_Pe->base + _Pe->resource_section_hdr->VirtualAddress + entries[i].OffsetToDirectory);
+			read_ressources_dir(_Pe, sub_dir,level+1,diff);
+		}
+		else
+		{
+			PIMAGE_RESOURCE_DATA_ENTRY data_entry = (PIMAGE_RESOURCE_DATA_ENTRY)((PCHAR)_Pe->base + _Pe->resource_section_hdr->VirtualAddress + entries[i].OffsetToData);
+			
+			printf("%lx -> ", data_entry->OffsetToData);
+			data_entry->OffsetToData += diff;
+			printf("%lx\n", data_entry->OffsetToData);
+		}
+	}
+}
+
+void read_ressources(PInPeConfig _Pe, DWORD diff) {
+	read_ressources_dir(_Pe,(PIMAGE_RESOURCE_DIRECTORY) ((PCHAR)_Pe->base + _Pe->resource_section_hdr->PointerToRawData),0, diff);
+
+}
+
 
 int main(int argc, char* argv[])
 {
@@ -125,6 +205,8 @@ int main(int argc, char* argv[])
 	_InitPeStruct(&dst_pe, dst);
 	check_collision(&dst_pe);
 
+	
+
 
 	// compute new image size
 	DWORD new_Image_size = dst_pe.pNtHdr->OptionalHeader.SizeOfImage + src_pe.resource_section_hdr->Misc.VirtualSize;//SizeOfRawData
@@ -135,8 +217,13 @@ int main(int argc, char* argv[])
 	// Get new section offset
 	DWORD new_section_offset = dst_size;
 
+	// Save old RVA
+	DWORD section_RVA = dst_pe.resource_section_hdr->VirtualAddress;
 	// Get new section RVA
 	DWORD new_section_RVA = dst_pe.pNtHdr->OptionalHeader.SizeOfImage;
+
+	// Diff
+	DWORD diff = new_section_RVA - section_RVA;
 
 	//DWORD new_section_max_offset_RVA = new_section_offset > new_section_RVA ? new_section_offset : new_section_RVA;
 
@@ -149,6 +236,7 @@ int main(int argc, char* argv[])
 	memcpy(new_dst, dst, dst_size);
 	InPeConfig new_dst_pe;
 	_InitPeStruct(&new_dst_pe, new_dst);
+	
 
 	// clear section
 	//printf("Clearing section\n");
@@ -159,20 +247,34 @@ int main(int argc, char* argv[])
 	// update image size
 	printf("updating image size\n");
 	new_dst_pe.pNtHdr->OptionalHeader.SizeOfImage = new_Image_size;
+	
 
 	// update section header
+
 	printf("updating section header\n");
-	new_dst_pe.resource_section_hdr->Characteristics = src_pe.resource_section_hdr->Characteristics;
+	memcpy(new_dst_pe.resource_section_hdr, src_pe.resource_section_hdr, sizeof(src_pe.resource_section_hdr));
+	
+	/*new_dst_pe.resource_section_hdr->Characteristics = src_pe.resource_section_hdr->Characteristics;
 	new_dst_pe.resource_section_hdr->Misc.VirtualSize = src_pe.resource_section_hdr->Misc.VirtualSize;
 	memcpy(new_dst_pe.resource_section_hdr->Name, src_pe.resource_section_hdr->Name, IMAGE_SIZEOF_SHORT_NAME);
 	new_dst_pe.resource_section_hdr->NumberOfLinenumbers = src_pe.resource_section_hdr->NumberOfLinenumbers;
 	new_dst_pe.resource_section_hdr->NumberOfRelocations = src_pe.resource_section_hdr->NumberOfRelocations;
 	new_dst_pe.resource_section_hdr->PointerToLinenumbers = src_pe.resource_section_hdr->PointerToLinenumbers;
 	new_dst_pe.resource_section_hdr->PointerToRelocations = src_pe.resource_section_hdr->PointerToRelocations;
-	new_dst_pe.resource_section_hdr->SizeOfRawData = src_pe.resource_section_hdr->SizeOfRawData;
+	new_dst_pe.resource_section_hdr->SizeOfRawData = src_pe.resource_section_hdr->SizeOfRawData;*/
 		
 	new_dst_pe.resource_section_hdr->PointerToRawData = new_section_offset;
 	new_dst_pe.resource_section_hdr->VirtualAddress = new_section_RVA;
+
+	// copy new section
+	printf("Copying new section");
+	PVOID rsrcSection_src = (PVOID)((ULONG_PTR)src_pe.base + (ULONG_PTR)src_pe.resource_section_hdr->PointerToRawData);
+	PVOID rsrcSection_new_dst = (PVOID)((ULONG_PTR)new_dst_pe.base + new_section_offset);//new_section_offset
+	DWORD size = src_pe.resource_section_hdr->SizeOfRawData;
+	memcpy(rsrcSection_new_dst, rsrcSection_src, size);
+	
+	
+	
 	
 	
 	// update directory
@@ -181,14 +283,18 @@ int main(int argc, char* argv[])
 	new_dst_pe.resource_directory->Size = src_pe.resource_directory->Size;
 
 	check_collision(&new_dst_pe);
+	
+	
+	sort_section_table(&new_dst_pe);
+	_InitPeStruct(&new_dst_pe, new_dst);
+	read_ressources(&new_dst_pe,diff);
+	
 
 
-	// copy new section
-	printf("Copying new section");
-	PVOID rsrcSection_src = (PVOID)((ULONG_PTR)src_pe.base + (ULONG_PTR)src_pe.resource_section_hdr->PointerToRawData);
-	PVOID rsrcSection_new_dst = (PVOID)((ULONG_PTR)new_dst_pe.base + new_section_offset);//new_section_offset
-	DWORD size = src_pe.resource_section_hdr->SizeOfRawData;
-	memcpy(rsrcSection_new_dst, rsrcSection_src, size);
+	
+
+
+	
 
 	// write file
 	printf("Write file\n");
