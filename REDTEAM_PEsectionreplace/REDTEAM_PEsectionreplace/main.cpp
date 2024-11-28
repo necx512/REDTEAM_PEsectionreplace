@@ -189,6 +189,112 @@ void read_ressources(PInPeConfig _Pe, DWORD diff) {
 }
 
 
+
+void same_virtualsize_as_rawisze(PInPeConfig _Pe)
+{
+	for (int i = 0; i < _Pe->pNtHdr->FileHeader.NumberOfSections ; i++) {
+		if (_Pe->pSecHdr[i].Misc.VirtualSize < _Pe->pSecHdr[i].SizeOfRawData) {
+			_Pe->pSecHdr[i].Misc.VirtualSize = _Pe->pSecHdr[i].SizeOfRawData;
+		}
+		else {
+			_Pe->pSecHdr[i].SizeOfRawData = _Pe->pSecHdr[i].Misc.VirtualSize;
+		}
+	}
+}
+
+
+
+DWORD getSpaceBetweenDOSHeaderAndNTHeader(PInPeConfig _Pe) {
+	return _Pe->pDosHdr->e_lfanew - sizeof(IMAGE_DOS_HEADER);
+}
+
+DWORD getSpaceBetweenHeadersAndFirstSection(PInPeConfig _Pe) {
+	if (sizeof(IMAGE_SECTION_HEADER) != 40) {
+		printf("FATAL\n");
+		exit(1);
+	}
+	DWORD endSectionsHdrOffset = _Pe->pDosHdr->e_lfanew + sizeof(IMAGE_NT_HEADERS) + sizeof(IMAGE_SECTION_HEADER) * (_Pe->pNtHdr->FileHeader.NumberOfSections);
+	return _Pe->pNtHdr->OptionalHeader.SizeOfHeaders - endSectionsHdrOffset;
+}
+
+
+PCHAR create_new_header(PInPeConfig _Pe, DWORD fileSize, DWORD size/*section size*/) {
+
+	DWORD aligment = _Pe->pNtHdr->OptionalHeader.SectionAlignment;
+
+	/*if (size % _Pe->pNtHdr->OptionalHeader.SectionAlignment != 0) {
+		fprintf(stderr, "FATAL : The size of the section you want to create is not align with SectionAlignment\n");
+		exit(2);
+	}
+	if (size % _Pe->pNtHdr->OptionalHeader.FileAlignment != 0) {
+		fprintf(stderr, "FATAL : The size of the section you want to create is not align with FileAlignment\n");
+		exit(2);
+	}*/
+
+	if (getSpaceBetweenHeadersAndFirstSection(_Pe) < sizeof(IMAGE_SECTION_HEADER)) {
+		fprintf(stderr, "FATAL Not enough space to create section\n");
+		exit(1);
+	}
+
+
+	DWORD offsetToNewSectionHdr = _Pe->pDosHdr->e_lfanew + sizeof(IMAGE_NT_HEADERS) + sizeof(IMAGE_SECTION_HEADER) * (_Pe->pNtHdr->FileHeader.NumberOfSections);
+	
+	// Get Last section header
+	IMAGE_SECTION_HEADER lastSectionHdr = _Pe->pSecHdr[_Pe->pNtHdr->FileHeader.NumberOfSections - 1];
+
+	// New Section
+	PIMAGE_SECTION_HEADER newSectionHdr = &_Pe->pSecHdr[_Pe->pNtHdr->FileHeader.NumberOfSections];
+
+	// Duplicate
+	*newSectionHdr = lastSectionHdr;
+
+	// update addresses
+	newSectionHdr->VirtualAddress = lastSectionHdr.VirtualAddress + lastSectionHdr.Misc.VirtualSize;
+	if (newSectionHdr->VirtualAddress % aligment != 0)
+		newSectionHdr->VirtualAddress = (newSectionHdr->VirtualAddress / aligment) * aligment + aligment;
+	
+	newSectionHdr->PointerToRawData = lastSectionHdr.PointerToRawData + lastSectionHdr.SizeOfRawData;
+	if (newSectionHdr->PointerToRawData % aligment != 0)
+		newSectionHdr->VirtualAddress = (newSectionHdr->PointerToRawData / aligment) * aligment + aligment;
+
+	// update size
+	
+
+	
+	newSectionHdr->Misc.VirtualSize = size;
+	newSectionHdr->SizeOfRawData = size;
+
+	
+
+	// change Name
+	newSectionHdr->Name[0] = '.';
+	newSectionHdr->Name[1] = 'r';
+	newSectionHdr->Name[2] = 's';
+	newSectionHdr->Name[3] = 'r';
+	newSectionHdr->Name[4] = 'c';
+	newSectionHdr->Name[5] = '\0';
+
+
+	// Increment the number of sections
+	_Pe->pNtHdr->FileHeader.NumberOfSections = _Pe->pNtHdr->FileHeader.NumberOfSections + 1;
+
+	//update ImageSize
+	_Pe->pNtHdr->OptionalHeader.SizeOfImage = _Pe->pNtHdr->OptionalHeader.SizeOfImage + size;
+	
+	// reallocate new file and init the new section to zero
+	PCHAR new_space = (PCHAR)VirtualAlloc(NULL, fileSize + size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+	new_space[fileSize] = 0xff;
+	memcpy(new_space,_Pe->base, fileSize);
+	free(_Pe->base);
+	_InitPeStruct(_Pe, new_space);
+
+	return &new_space[fileSize];
+
+
+}
+
+
+
 int main(int argc, char* argv[])
 {
 	// We load both file
@@ -204,107 +310,57 @@ int main(int argc, char* argv[])
 	PVOID dst = get_file("C:\\Users\\seb\\source\\repos\\Project1\\x64\\Release\\whoami_origin.exe", &dst_size);
 	_InitPeStruct(&dst_pe, dst);
 	check_collision(&dst_pe);
-
+	DWORD RVA_originrsrcSection = dst_pe.resource_section_hdr->VirtualAddress;
 	
 
-
-	// compute new image size
-	DWORD new_Image_size = dst_pe.pNtHdr->OptionalHeader.SizeOfImage + src_pe.resource_section_hdr->Misc.VirtualSize;//SizeOfRawData
-
-	// compute new_file_size
-	size_t new_file_size = dst_size + src_pe.resource_section_hdr->SizeOfRawData;
-
-	// Get new section offset
-	DWORD new_section_offset = dst_size;
-
-	// Save old RVA
-	DWORD section_RVA = dst_pe.resource_section_hdr->VirtualAddress;
-	// Get new section RVA
-	DWORD new_section_RVA = dst_pe.pNtHdr->OptionalHeader.SizeOfImage;
-
-	// Diff
-	DWORD diff = new_section_RVA - section_RVA;
-
-	//DWORD new_section_max_offset_RVA = new_section_offset > new_section_RVA ? new_section_offset : new_section_RVA;
-
-	// allocate
-	printf("Allocate\n");
-	PVOID new_dst = (PVOID)VirtualAlloc(NULL, new_file_size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
-
-	// copy original destination
-	printf("Copy original destination\n");
-	memcpy(new_dst, dst, dst_size);
-	InPeConfig new_dst_pe;
-	_InitPeStruct(&new_dst_pe, new_dst);
+	DWORD new_file_size = dst_size + src_pe.resource_section_hdr->SizeOfRawData;
+	PCHAR new_section = create_new_header(&dst_pe, dst_size,src_pe.resource_section_hdr->SizeOfRawData);
 	
 
-	// clear section
-	//printf("Clearing section\n");
-	//memset( (PVOID) ((ULONG_PTR)new_dst_pe.base + new_dst_pe.resource_section_hdr->PointerToRawData), 0, new_dst_pe.resource_section_hdr->SizeOfRawData);
-	
-
-
-	// update image size
-	printf("updating image size\n");
-	new_dst_pe.pNtHdr->OptionalHeader.SizeOfImage = new_Image_size;
-	
-
-	// update section header
-
-	printf("updating section header\n");
-	memcpy(new_dst_pe.resource_section_hdr, src_pe.resource_section_hdr, sizeof(src_pe.resource_section_hdr));
-	
-	/*new_dst_pe.resource_section_hdr->Characteristics = src_pe.resource_section_hdr->Characteristics;
-	new_dst_pe.resource_section_hdr->Misc.VirtualSize = src_pe.resource_section_hdr->Misc.VirtualSize;
-	memcpy(new_dst_pe.resource_section_hdr->Name, src_pe.resource_section_hdr->Name, IMAGE_SIZEOF_SHORT_NAME);
-	new_dst_pe.resource_section_hdr->NumberOfLinenumbers = src_pe.resource_section_hdr->NumberOfLinenumbers;
-	new_dst_pe.resource_section_hdr->NumberOfRelocations = src_pe.resource_section_hdr->NumberOfRelocations;
-	new_dst_pe.resource_section_hdr->PointerToLinenumbers = src_pe.resource_section_hdr->PointerToLinenumbers;
-	new_dst_pe.resource_section_hdr->PointerToRelocations = src_pe.resource_section_hdr->PointerToRelocations;
-	new_dst_pe.resource_section_hdr->SizeOfRawData = src_pe.resource_section_hdr->SizeOfRawData;*/
-		
-	new_dst_pe.resource_section_hdr->PointerToRawData = new_section_offset;
-	new_dst_pe.resource_section_hdr->VirtualAddress = new_section_RVA;
 
 	// copy new section
 	printf("Copying new section");
 	PVOID rsrcSection_src = (PVOID)((ULONG_PTR)src_pe.base + (ULONG_PTR)src_pe.resource_section_hdr->PointerToRawData);
-	PVOID rsrcSection_new_dst = (PVOID)((ULONG_PTR)new_dst_pe.base + new_section_offset);//new_section_offset
 	DWORD size = src_pe.resource_section_hdr->SizeOfRawData;
-	memcpy(rsrcSection_new_dst, rsrcSection_src, size);
-	
-	
-	
-	
-	
+	memcpy(new_section, rsrcSection_src, size);
+
+
 	// update directory
 	printf("Update directory\n");
-	new_dst_pe.resource_directory->VirtualAddress = new_section_RVA; //
-	new_dst_pe.resource_directory->Size = src_pe.resource_directory->Size;
-
-	check_collision(&new_dst_pe);
-	
-	
-	sort_section_table(&new_dst_pe);
-	_InitPeStruct(&new_dst_pe, new_dst);
-	read_ressources(&new_dst_pe,diff);
-	
+	PIMAGE_SECTION_HEADER original_rsrc_section_hdr = dst_pe.resource_section_hdr;// dst_pe.resource_section_hdr will be computed from dst_pe.resource_directory so we need to save it
+	dst_pe.resource_directory->VirtualAddress = dst_pe.pSecHdr[dst_pe.pNtHdr->FileHeader.NumberOfSections - 1].VirtualAddress; //UPDATE
+	dst_pe.resource_directory->Size = dst_pe.pSecHdr[dst_pe.pNtHdr->FileHeader.NumberOfSections - 1].Misc.VirtualSize;
+	_InitPeStruct(&dst_pe, dst_pe.base);
 
 
+	DWORD diff = dst_pe.resource_section_hdr->VirtualAddress - RVA_originrsrcSection;
+	printf("DIFF = %lx\n", diff);
+
+	read_ressources(&dst_pe, diff); //UPDATE
+
+	// Clear original section
+	PCHAR ptr = (PCHAR)dst_pe.base + original_rsrc_section_hdr->PointerToRawData;
+	memset(ptr, 0, original_rsrc_section_hdr->SizeOfRawData);
+
+	// clear name
+	original_rsrc_section_hdr->Name[0] = 'o'; // '.'
+
+
+	//TODO checksum
+
 	
 
 
-	
 
 	// write file
 	printf("Write file\n");
 	FILE* file = NULL;
 	fopen_s(&file, "C:\\Users\\seb\\source\\repos\\Project1\\x64\\Release\\output.exe", "wb");
-	fwrite(new_dst, 1, new_file_size, file);
+	fwrite(dst_pe.base, 1, new_file_size, file);
 	fclose(file);
 
 
-	// Est ce que les info du directory sont les meme que dans le header de section en ce qui concerne la RVA et la taille?
 
 
+	return 0;
 }
